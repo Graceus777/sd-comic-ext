@@ -28,3 +28,7 @@ Thumbs.db
 
 # Project-specific
 comic/scenarios_extended.py
+
+# Local drafts / ad-hoc scripts (not for the repo)
+_local/
+layout_demos/
