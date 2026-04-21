@@ -171,7 +171,7 @@ def build_panel_prompt(
     """
     Assemble the positive prompt for a single panel.
 
-    Order (character):  <lora>, base_positive, activation, 1girl, [shot_token], scene, extra
+    Order (character):  base_positive, <lora>, activation, [shot_token], scene, extra
     Order (no_char):    base_positive (stripped), scene, extra, no people tags
     """
     parts: List[str] = []
@@ -182,18 +182,17 @@ def build_panel_prompt(
         weight = character.get("weight", 0.8)
         activation = character.get("activation", "")
 
-        if lora_name:
-            parts.append(f"<lora:{lora_name}:{weight}>")
-
         if base_positive:
             bp = re.sub(r',?\s*1girl\s*,?\s*', ', ', base_positive)
             bp = re.sub(r',?\s*solo\s*,?\s*', ', ', bp)
             bp = re.sub(r',\s*,', ',', bp).strip(', ')
             parts.append(bp)
 
+        if lora_name:
+            parts.append(f"<lora:{lora_name}:{weight}>")
+
         if activation:
             parts.append(activation)
-        parts.append("1girl")
     else:
         strip_tags = [r'1girl', r'solo', r'detailed skin', r'detailed face',
                       r'beautiful', r'aesthetic']
@@ -215,6 +214,6 @@ def build_panel_prompt(
         parts.append(panel["positive_extra"])
 
     if no_char:
-        parts.append("no people, no person, no humans, scenery, background")
+        parts.append("no people, no person, no humans")
 
     return ", ".join(parts)
