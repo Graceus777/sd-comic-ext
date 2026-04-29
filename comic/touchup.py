@@ -180,14 +180,19 @@ def touchup_panels(
         init_path = entry.get("init_image") or ""
         mask_path = entry.get("mask_image") or ""
 
-        # Per-card denoise — applies to img2img and inpaint
+        # Per-card denoise — only applied when the user is steering the
+        # init source explicitly (img2img/inpaint). In Auto mode we defer
+        # to the script's init_denoise so per-panel chain values aren't
+        # silently overwritten by the slider's default.
+        slider_denoise: Optional[float] = None
         if "init_denoise" in entry and entry["init_denoise"] is not None:
             try:
-                denoise_val = float(entry["init_denoise"])
-                panel["init_denoise"] = denoise_val
-                panel["inpaint_denoise"] = denoise_val
+                slider_denoise = float(entry["init_denoise"])
             except (TypeError, ValueError):
-                pass
+                slider_denoise = None
+        if slider_denoise is not None and init_mode in ("img2img", "inpaint"):
+            panel["init_denoise"] = slider_denoise
+            panel["inpaint_denoise"] = slider_denoise
 
         # Backup or delete existing before generating
         if overwrite:
