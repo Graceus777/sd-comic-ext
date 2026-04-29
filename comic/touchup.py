@@ -155,6 +155,11 @@ def touchup_panels(
             _log("Touchup interrupted by user")
             break
 
+        # Reclaim VRAM before each panel (A1111's UI wrapper would
+        # normally do this for us — we bypass it by calling processing
+        # directly, so without this multi-panel runs OOM after ~3 panels).
+        gen_engine.torch_gc()
+
         panel_id = entry.get("panel_id") or ""
         if not panel_id:
             continue

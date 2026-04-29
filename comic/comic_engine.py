@@ -843,6 +843,11 @@ def run_comic_script(
             _log("Generation interrupted by user")
             break
 
+        # Reclaim VRAM before each panel (A1111's UI wrapper would
+        # normally do this — we call processing directly so without an
+        # explicit GC, multi-panel runs OOM after a handful of panels).
+        gen_engine.torch_gc()
+
         panel_id = panel.get("id", f"page{pi+1}_panel{qi+1}")
         scene = panel.get("scene", "")
         scene_preview = scene[:80] + ("..." if len(scene) > 80 else "")

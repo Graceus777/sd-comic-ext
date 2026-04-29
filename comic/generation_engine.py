@@ -32,6 +32,31 @@ def _set_job(job_name: str):
         pass
 
 
+def torch_gc():
+    """Reclaim VRAM between panels.
+
+    A1111's UI normally wraps Generate clicks with `wrap_gradio_gpu_call`,
+    which runs `devices.torch_gc()` before and after each call. We call
+    `processing.process_images` directly, so without an explicit GC
+    between panels VRAM accumulates and a multi-panel run OOMs after a
+    handful of generations.
+    """
+    try:
+        from modules import devices
+        devices.torch_gc()
+    except Exception:
+        # Fallback if A1111's helper is unavailable for any reason
+        try:
+            import gc
+            import torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+
 def generate_txt2img(
     prompt: str,
     negative_prompt: str = "",
