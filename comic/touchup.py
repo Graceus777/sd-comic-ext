@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional
 from PIL import Image
 
 from comic import comic_engine
+from comic import assembler
 from comic import generation_engine as gen_engine
 from comic.prompt_builder import build_panel_prompt
 
@@ -78,6 +79,33 @@ def _find_panel_in_script(script: Dict[str, Any], panel_id: str):
         if panel.get("id") == panel_id:
             return page, panel
     return None, None
+
+
+def _resolve_chain_init_path(script: Dict[str, Any], panel: Dict[str, Any],
+                             image_dir: str, title_tag: str,
+                             log: Optional[Callable] = None) -> Optional[str]:
+    """For a panel with `init_from`, find the predecessor's existing image on
+    disk so it can be used as the img2img source without regenerating the
+    whole chain. Walks the chain up to a depth limit if the immediate
+    predecessor is missing on disk.
+    """
+    visited: List[str] = []
+    cur_id = panel.get("init_from")
+    while cur_id and cur_id not in visited and len(visited) < 16:
+        visited.append(cur_id)
+        _, src_panel = _find_panel_in_script(script, cur_id)
+        if src_panel is None:
+            if log:
+                log(f"  chain: predecessor '{cur_id}' not in script")
+            return None
+        path = assembler.find_script_panel_image(
+            src_panel, [image_dir], title_tag,
+        )
+        if path and os.path.isfile(path):
+            return path
+        # predecessor has no image yet — try one further back
+        cur_id = src_panel.get("init_from")
+    return None
 
 
 # -- public API ------------------------------------------------------------
@@ -148,9 +176,18 @@ def touchup_panels(
         else:
             _log(f"[{idx+1}/{len(flagged)}] {panel_id}")
 
-        init_mode = (entry.get("init_mode") or "txt2img").lower()
+        init_mode = (entry.get("init_mode") or "auto").lower()
         init_path = entry.get("init_image") or ""
         mask_path = entry.get("mask_image") or ""
+
+        # Per-card denoise — applies to img2img and inpaint
+        if "init_denoise" in entry and entry["init_denoise"] is not None:
+            try:
+                denoise_val = float(entry["init_denoise"])
+                panel["init_denoise"] = denoise_val
+                panel["inpaint_denoise"] = denoise_val
+            except (TypeError, ValueError):
+                pass
 
         # Backup or delete existing before generating
         if overwrite:
@@ -192,7 +229,7 @@ def touchup_panels(
                 time.sleep(cooldown)
             continue
 
-        # -- txt2img / img2img via generate_panel -------------------------
+        # -- txt2img / img2img / auto via generate_panel ------------------
         # For img2img, seed `generated_paths` with the init image so
         # generate_panel's img2img branch picks it up.
         generated_paths: Dict[str, str] = {}
@@ -200,11 +237,25 @@ def touchup_panels(
             # Stash under a synthetic key and wire panel.init_from to it
             panel["init_from"] = f"__touchup_src_{panel_id}"
             generated_paths[panel["init_from"]] = init_path
-            if "init_denoise" in entry:
-                panel["init_denoise"] = float(entry["init_denoise"])
-        else:
-            # Strip any existing init_from so we force a fresh txt2img
+        elif init_mode == "auto" and panel.get("init_from"):
+            # Follow the script's chain: use the predecessor's existing
+            # image on disk as the init source — no need to regenerate
+            # upstream panels.
+            chain_src = _resolve_chain_init_path(
+                script, panel, image_dir, title_tag, log=_log,
+            )
+            if chain_src:
+                generated_paths[panel["init_from"]] = chain_src
+                _log(f"  chain: img2img from '{panel['init_from']}' "
+                     f"({os.path.basename(chain_src)})")
+            else:
+                _log(f"  chain: predecessor image missing — "
+                     f"falling back to fresh txt2img")
+                panel.pop("init_from", None)
+        elif init_mode == "txt2img":
+            # Explicit override: ignore script chain
             panel.pop("init_from", None)
+        # else: init_mode == "auto" with no init_from in script → plain txt2img
 
         page_seed = comic_engine.compute_page_seed(title, 0)
         # If the panel specifies a scene_tag, seed hierarchy already handles it.

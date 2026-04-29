@@ -28,7 +28,8 @@ MAX_TOUCHUP_PANELS = 64
 
 STATUS_CHOICES = ["Good", "Flag for touchup", "Remove from slide"]
 INIT_MODES = [
-    "Txt2img (fresh)",
+    "Auto (follow script chain)",
+    "Txt2img (fresh, ignore chain)",
     "Img2img from current",
     "Inpaint (paint mask on image)",
 ]
@@ -111,6 +112,7 @@ def _load_panels(script_path: str, image_dir: str, _state):
                 gr.update(value=STATUS_CHOICES[0]),  # status
                 gr.update(value=""),       # prompt override
                 gr.update(value=INIT_MODES[0]),      # init mode
+                gr.update(value=0.55),               # denoise
             ])
         return ["\n".join(log_lines), state, gr.update(value=image_dir)] + card_updates
 
@@ -157,6 +159,7 @@ def _load_panels(script_path: str, image_dir: str, _state):
                 gr.update(value=STATUS_CHOICES[0]),
                 gr.update(value=""),
                 gr.update(value=INIT_MODES[0]),
+                gr.update(value=0.55),
             ])
         else:
             card_updates.extend([
@@ -166,6 +169,7 @@ def _load_panels(script_path: str, image_dir: str, _state):
                 gr.update(value=STATUS_CHOICES[0]),
                 gr.update(value=""),
                 gr.update(value=INIT_MODES[0]),
+                gr.update(value=0.55),
             ])
 
     return ["\n".join(log_lines), state, gr.update(value=resolved_dir)] + card_updates
@@ -198,9 +202,9 @@ def _regen(state, overwrite, candidates, cooldown,
            ad_inpaint_only_masked, ad_inpaint_only_masked_padding,
            *card_values):
     """
-    card_values is a flat tuple of (status, prompt_override, init_mode, image)
-    for each of MAX_TOUCHUP_PANELS. (image is the current gr.Image value
-    supplied back to use as img2img/inpaint source.)
+    card_values is a flat tuple of (status, prompt_override, init_mode, image,
+    denoise) for each of MAX_TOUCHUP_PANELS. (image is the current gr.Image
+    value supplied back to use as img2img/inpaint source.)
     """
     log_lines: List[str] = []
     if not state or not state.get("script_path"):
@@ -215,7 +219,7 @@ def _regen(state, overwrite, candidates, cooldown,
     if not image_dir:
         return "Missing image directory.", []
 
-    per_card = 4  # status, prompt_override, init_mode, current_image
+    per_card = 5  # status, prompt_override, init_mode, current_image, denoise
     panels = state.get("panels", [])
     flagged: List[Dict[str, Any]] = []
     skip_msgs: List[str] = []
@@ -229,15 +233,17 @@ def _regen(state, overwrite, candidates, cooldown,
         prompt_override = card_values[base + 1]
         init_mode_label = card_values[base + 2]
         current_image = card_values[base + 3]
+        denoise_val = card_values[base + 4]
 
         if status != "Flag for touchup":
             continue
 
         init_mode = {
-            "Txt2img (fresh)": "txt2img",
+            "Auto (follow script chain)": "auto",
+            "Txt2img (fresh, ignore chain)": "txt2img",
             "Img2img from current": "img2img",
             "Inpaint (paint mask on image)": "inpaint",
-        }.get(init_mode_label, "txt2img")
+        }.get(init_mode_label, "auto")
 
         init_pil, mask_pil = _split_image_value(current_image)
         panel_id = meta["panel_id"]
@@ -280,6 +286,7 @@ def _regen(state, overwrite, candidates, cooldown,
             "init_mode": init_mode,
             "init_image": init_path,
             "mask_image": mask_path,
+            "init_denoise": float(denoise_val) if denoise_val is not None else 0.55,
         })
 
     if not flagged:
@@ -401,6 +408,7 @@ def build_touchup_tab(build_adetailer_block):
     card_statuses: List[gr.Radio] = []
     card_overrides: List[gr.Textbox] = []
     card_init_modes: List[gr.Dropdown] = []
+    card_denoises: List[gr.Slider] = []
 
     with gr.Column():
         # Two-column grid of cards
@@ -413,7 +421,7 @@ def build_touchup_tab(build_adetailer_block):
                             type="pil",
                             tool="sketch",
                             source="upload",
-                            height=320,
+                            height=640,
                             interactive=True,
                         )
                     with gr.Column(scale=2):
@@ -434,20 +442,27 @@ def build_touchup_tab(build_adetailer_block):
                             value=INIT_MODES[0],
                             info="Inpaint: paint over the area to regenerate, then flag and run.",
                         )
+                        denoise = gr.Slider(
+                            label="Denoising strength (img2img / inpaint)",
+                            minimum=0.0, maximum=1.0, step=0.01, value=0.55,
+                            info="Ignored for Txt2img.",
+                        )
             card_groups.append(g)
             card_images.append(img)
             card_labels.append(lbl)
             card_statuses.append(status)
             card_overrides.append(override)
             card_init_modes.append(init_mode)
+            card_denoises.append(denoise)
 
     # Ordered list of per-card components used in load output:
-    #   group, image, label, status, override, init_mode
+    #   group, image, label, status, override, init_mode, denoise
     load_outputs: List[Any] = []
     for i in range(MAX_TOUCHUP_PANELS):
         load_outputs.extend([
             card_groups[i], card_images[i], card_labels[i],
             card_statuses[i], card_overrides[i], card_init_modes[i],
+            card_denoises[i],
         ])
 
     with gr.Accordion("Touchup settings", open=False):
@@ -514,6 +529,7 @@ def build_touchup_tab(build_adetailer_block):
         regen_card_inputs.extend([
             card_statuses[i], card_overrides[i],
             card_init_modes[i], card_images[i],
+            card_denoises[i],
         ])
 
     tu_regen_btn.click(
