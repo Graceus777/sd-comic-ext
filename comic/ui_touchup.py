@@ -336,6 +336,42 @@ def _regen(state, overwrite, candidates, cooldown,
     return "\n".join(log_lines), result.get("files", [])
 
 
+# -- Restore from backup ---------------------------------------------------
+
+def _restore_backups(state, *statuses):
+    """Restore the most recent _touchup_backup/ entry for every flagged
+    panel — meant for recovering after a partially failed touchup run."""
+    log_lines: List[str] = []
+    if not state or not state.get("script_path"):
+        return "Load a script first."
+    try:
+        script = _load_script_from_path(state["script_path"])
+    except Exception as e:
+        return f"Script reload failed: {e}"
+
+    panels = state.get("panels", [])
+    panel_ids: List[str] = []
+    for i, meta in enumerate(panels):
+        if i >= MAX_TOUCHUP_PANELS:
+            break
+        if statuses[i] == "Flag for touchup":
+            panel_ids.append(meta["panel_id"])
+
+    if not panel_ids:
+        return ("Flag the panels you want to restore from _touchup_backup/, "
+                "then click Restore.")
+
+    image_dir = state.get("image_dir") or ""
+    if not image_dir:
+        return "Missing image directory."
+
+    touchup_backend.restore_last_backup(
+        script, image_dir, panel_ids,
+        log=lambda m: log_lines.append(m),
+    )
+    return "\n".join(log_lines)
+
+
 # -- Apply Removes ---------------------------------------------------------
 
 def _apply_removes(state, *statuses):
@@ -488,6 +524,10 @@ def build_touchup_tab(build_adetailer_block):
 
     with gr.Row():
         tu_regen_btn = gr.Button("Touch Up Flagged Panels", variant="primary")
+        tu_restore_btn = gr.Button(
+            "Restore Backup (flagged)",
+            elem_id="tu_restore_btn",
+        )
         tu_apply_removes_btn = gr.Button("Apply Removes")
         tu_assemble_btn = gr.Button("Re-assemble Pages")
         tu_stop_btn = gr.Button("Stop", variant="stop")
@@ -539,6 +579,12 @@ def build_touchup_tab(build_adetailer_block):
             *tu_ad_inputs,
         ] + regen_card_inputs,
         outputs=[tu_log, tu_gallery],
+    )
+
+    tu_restore_btn.click(
+        fn=_restore_backups,
+        inputs=[tu_state] + card_statuses,
+        outputs=[tu_log],
     )
 
     tu_apply_removes_btn.click(

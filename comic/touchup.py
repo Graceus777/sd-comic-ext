@@ -301,6 +301,83 @@ def touchup_panels(
     }
 
 
+def _strip_backup_prefix(name: str) -> str:
+    """Strip the leading '{epoch_ts}_' that _backup_existing prepends.
+
+    Backup names look like "1714312345_20260421-134354_The_Garden_p019.png".
+    The first underscore-separated chunk is the backup epoch timestamp.
+    """
+    parts = name.split("_", 1)
+    if len(parts) == 2 and parts[0].isdigit():
+        return parts[1]
+    return name
+
+
+def restore_last_backup(script: Dict[str, Any], image_dir: str,
+                        panel_ids: List[str],
+                        log: Optional[Callable] = None) -> int:
+    """Move the newest backup of each given panel back into image_dir
+    under its original filename. Scans both _touchup_backup/ and
+    _removed/ — whichever has the most recent matching file wins.
+    Both subfolders use the same `{epoch_ts}_{original_name}` naming."""
+    def _log(msg: str):
+        if log:
+            log(msg)
+
+    if not panel_ids:
+        _log("No panels selected for restore")
+        return 0
+
+    candidate_dirs = [
+        os.path.join(image_dir, "_touchup_backup"),
+        os.path.join(image_dir, "_removed"),
+    ]
+    candidate_dirs = [d for d in candidate_dirs if os.path.isdir(d)]
+    if not candidate_dirs:
+        _log("No _touchup_backup/ or _removed/ to restore from")
+        return 0
+
+    title_tag = comic_engine.make_title_tag(script.get("title", "Untitled"))
+    restored = 0
+
+    for pid in panel_ids:
+        # Collect matches across both folders, keep the newest by epoch
+        # prefix (which is the first chunk of every backed-up filename).
+        matches: List[str] = []
+        for d in candidate_dirs:
+            pattern = os.path.join(d, f"*_{title_tag}_{pid}*.png")
+            matches.extend(globmod.glob(pattern))
+
+        if not matches:
+            _log(f"  {pid}: no backup found")
+            continue
+
+        # Sort by the leading epoch ts in the basename (newest first).
+        def _ts_key(path: str) -> int:
+            head = os.path.basename(path).split("_", 1)[0]
+            return int(head) if head.isdigit() else 0
+
+        matches.sort(key=_ts_key, reverse=True)
+        src = matches[0]
+        src_folder = os.path.basename(os.path.dirname(src))
+        original_name = _strip_backup_prefix(os.path.basename(src))
+        dest = os.path.join(image_dir, original_name)
+
+        if os.path.isfile(dest):
+            _log(f"  {pid}: SKIP - {original_name} already in image dir")
+            continue
+
+        try:
+            shutil.move(src, dest)
+            restored += 1
+            _log(f"  {pid}: restored {original_name} (from {src_folder}/)")
+        except OSError as e:
+            _log(f"  {pid}: FAIL - {e}")
+
+    _log(f"Restored {restored} panel(s)")
+    return restored
+
+
 def apply_removes(script: Dict[str, Any], image_dir: str,
                   panel_ids: List[str],
                   log: Optional[Callable] = None) -> int:
