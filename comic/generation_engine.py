@@ -188,6 +188,76 @@ def generate_img2img(
     )
 
 
+def generate_inpaint(
+    init_image: Image.Image,
+    mask_image: Image.Image,
+    prompt: str,
+    negative_prompt: str = "",
+    steps: int = 27,
+    sampler_name: str = "Euler a",
+    cfg_scale: float = 6.0,
+    width: int = 1024,
+    height: int = 1280,
+    seed: int = -1,
+    denoising_strength: float = 0.75,
+    mask_blur: int = 4,
+    inpainting_fill: int = 1,
+    inpaint_full_res: bool = True,
+    inpaint_full_res_padding: int = 32,
+    enable_adetailer: bool = False,
+    adetailer_settings: Optional[Dict] = None,
+    output_dir: str = "generated_images",
+    custom_filename: str = "inpaint",
+) -> Tuple[bool, str, List[str], List[Image.Image]]:
+    """Inpaint an image via A1111 internal processing."""
+    from modules import processing, shared
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    p = processing.StableDiffusionProcessingImg2Img(
+        sd_model=shared.sd_model,
+        init_images=[init_image],
+        mask=mask_image,
+        mask_blur=mask_blur,
+        inpainting_fill=inpainting_fill,
+        inpaint_full_res=inpaint_full_res,
+        inpaint_full_res_padding=inpaint_full_res_padding,
+        inpainting_mask_invert=0,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        steps=steps,
+        sampler_name=sampler_name,
+        cfg_scale=cfg_scale,
+        width=width,
+        height=height,
+        seed=seed,
+        batch_size=1,
+        denoising_strength=denoising_strength,
+        resize_mode=0,
+        outpath_samples=output_dir,
+        outpath_grids=output_dir,
+    )
+
+    if enable_adetailer:
+        _attach_adetailer(p, adetailer_settings)
+
+    try:
+        result = processing.process_images(p)
+    except Exception as e:
+        return False, f"Inpaint error: {e}", [], []
+
+    if not result.images:
+        return False, "No images generated", [], []
+
+    images_out = list(result.images[:1])
+    info_text = getattr(result, "info", None)
+
+    saved_files = _save_images(images_out, output_dir, custom_filename, info_text=info_text)
+    _mirror_to_default_output(images_out, "img2img", info_text=info_text)
+
+    return True, f"Inpainted {len(saved_files)} image(s)", saved_files, images_out
+
+
 def interrogate_clip(image: Image.Image) -> Optional[str]:
     """Get CLIP tags for an image using A1111's built-in interrogator."""
     try:

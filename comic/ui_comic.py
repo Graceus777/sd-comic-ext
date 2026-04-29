@@ -762,6 +762,71 @@ def _export_cbz(page_gallery):
     return f"CBZ exported: {result}" if result else "Export failed"
 
 
+def build_adetailer_block():
+    """Build the ADetailer accordion; returns the components in _ad_inputs order."""
+    with gr.Accordion("ADetailer", open=False):
+        ad_enabled = gr.Checkbox(
+            label="Enable ADetailer",
+            value=True,
+            info="Runs ADetailer face/person inpainting after generation. Disable to skip entirely.",
+        )
+        ad_model = gr.Dropdown(
+            label="Detector model",
+            choices=_list_ad_models(),
+            value="face_yolov8n.pt",
+            interactive=True,
+        )
+        ad_refresh_models_btn = gr.Button("Refresh models", size="sm")
+        ad_prompt = gr.Textbox(
+            label="ADetailer prompt",
+            placeholder="Leave blank to use the main prompt",
+            lines=2,
+        )
+        ad_negative_prompt = gr.Textbox(
+            label="ADetailer negative prompt",
+            placeholder="Leave blank to use the main negative prompt",
+            lines=2,
+        )
+        with gr.Row():
+            ad_confidence = gr.Slider(
+                label="Detection confidence",
+                minimum=0.0, maximum=1.0, step=0.01, value=0.3,
+            )
+            ad_denoising_strength = gr.Slider(
+                label="Inpaint denoising strength",
+                minimum=0.0, maximum=1.0, step=0.01, value=0.4,
+            )
+        with gr.Row():
+            ad_mask_blur = gr.Slider(
+                label="Mask blur",
+                minimum=0, maximum=64, step=1, value=4,
+            )
+            ad_dilate_erode = gr.Slider(
+                label="Mask erosion(-) / dilation(+)",
+                minimum=-128, maximum=128, step=4, value=4,
+            )
+        with gr.Row():
+            ad_inpaint_only_masked = gr.Checkbox(
+                label="Inpaint only masked", value=True,
+            )
+            ad_inpaint_only_masked_padding = gr.Slider(
+                label="Masked padding (px)",
+                minimum=0, maximum=256, step=4, value=32,
+            )
+
+        ad_refresh_models_btn.click(
+            fn=lambda: gr.update(choices=_list_ad_models()),
+            outputs=[ad_model],
+        )
+
+    return [
+        ad_enabled, ad_model, ad_prompt, ad_negative_prompt,
+        ad_confidence, ad_denoising_strength,
+        ad_mask_blur, ad_dilate_erode,
+        ad_inpaint_only_masked, ad_inpaint_only_masked_padding,
+    ]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN TAB BUILDER
 # ═══════════════════════════════════════════════════════════════════════════
@@ -770,6 +835,23 @@ def create_comic_tab():
     """Create the Comic Generator tab with Comic and Assembly sub-tabs."""
 
     with gr.Blocks(analytics_enabled=False) as tab:
+        gr.HTML(
+            """<style>
+            #comic_panel_gallery .preview .icon-button,
+            #comic_page_gallery .preview .icon-button,
+            #asm_gallery .preview .icon-button,
+            #comic_panel_gallery button[aria-label='Previous'],
+            #comic_panel_gallery button[aria-label='Next'],
+            #comic_page_gallery button[aria-label='Previous'],
+            #comic_page_gallery button[aria-label='Next'],
+            #asm_gallery button[aria-label='Previous'],
+            #asm_gallery button[aria-label='Next'] {
+                pointer-events: auto !important;
+                z-index: 50 !important;
+                opacity: 1 !important;
+            }
+            </style>"""
+        )
         gr.Markdown("## Comic Generator")
 
         with gr.Tabs():
@@ -958,60 +1040,7 @@ def create_comic_tab():
                                 step=100, value=2400,
                             )
 
-                        with gr.Accordion("ADetailer", open=False):
-                            ad_enabled = gr.Checkbox(
-                                label="Enable ADetailer",
-                                value=True,
-                                info="Runs ADetailer face/person inpainting after generation. Disable to skip entirely.",
-                            )
-                            ad_model = gr.Dropdown(
-                                label="Detector model",
-                                choices=_list_ad_models(),
-                                value="face_yolov8n.pt",
-                                interactive=True,
-                            )
-                            ad_refresh_models_btn = gr.Button("Refresh models", size="sm")
-                            ad_prompt = gr.Textbox(
-                                label="ADetailer prompt",
-                                placeholder="Leave blank to use the main prompt",
-                                lines=2,
-                            )
-                            ad_negative_prompt = gr.Textbox(
-                                label="ADetailer negative prompt",
-                                placeholder="Leave blank to use the main negative prompt",
-                                lines=2,
-                            )
-                            with gr.Row():
-                                ad_confidence = gr.Slider(
-                                    label="Detection confidence",
-                                    minimum=0.0, maximum=1.0, step=0.01, value=0.3,
-                                )
-                                ad_denoising_strength = gr.Slider(
-                                    label="Inpaint denoising strength",
-                                    minimum=0.0, maximum=1.0, step=0.01, value=0.4,
-                                )
-                            with gr.Row():
-                                ad_mask_blur = gr.Slider(
-                                    label="Mask blur",
-                                    minimum=0, maximum=64, step=1, value=4,
-                                )
-                                ad_dilate_erode = gr.Slider(
-                                    label="Mask erosion(-) / dilation(+)",
-                                    minimum=-128, maximum=128, step=4, value=4,
-                                )
-                            with gr.Row():
-                                ad_inpaint_only_masked = gr.Checkbox(
-                                    label="Inpaint only masked", value=True,
-                                )
-                                ad_inpaint_only_masked_padding = gr.Slider(
-                                    label="Masked padding (px)",
-                                    minimum=0, maximum=256, step=4, value=32,
-                                )
-
-                            ad_refresh_models_btn.click(
-                                fn=lambda: gr.update(choices=_list_ad_models()),
-                                outputs=[ad_model],
-                            )
+                        _ad_inputs = build_adetailer_block()
 
                         with gr.Row():
                             gen_panels_btn = gr.Button("Generate Panels", variant="primary")
@@ -1020,8 +1049,16 @@ def create_comic_tab():
 
                 comic_log = gr.Textbox(label="Log", lines=10, interactive=False)
                 with gr.Row():
-                    comic_panel_gallery = gr.Gallery(label="Generated Panels", columns=4, height=400)
-                    comic_page_gallery = gr.Gallery(label="Assembled Pages", columns=2, height=400)
+                    comic_panel_gallery = gr.Gallery(
+                        label="Generated Panels", columns=4, height=400,
+                        preview=True, allow_preview=True, object_fit="contain",
+                        elem_id="comic_panel_gallery",
+                    )
+                    comic_page_gallery = gr.Gallery(
+                        label="Assembled Pages", columns=2, height=400,
+                        preview=True, allow_preview=True, object_fit="contain",
+                        elem_id="comic_page_gallery",
+                    )
 
                 # ── Wiring: Script Wizard (integrated) ────────────────────
 
@@ -1144,12 +1181,6 @@ def create_comic_tab():
 
                 # ── Wiring: Generation ────────────────────────────────────
 
-                _ad_inputs = [
-                    ad_enabled, ad_model, ad_prompt, ad_negative_prompt,
-                    ad_confidence, ad_denoising_strength,
-                    ad_mask_blur, ad_dilate_erode,
-                    ad_inpaint_only_masked, ad_inpaint_only_masked_padding,
-                ]
                 gen_panels_btn.click(
                     fn=_generate_comic_panels,
                     inputs=[
@@ -1165,6 +1196,11 @@ def create_comic_tab():
                     outputs=[comic_log, comic_page_gallery],
                 )
                 stop_comic_btn.click(fn=_stop, outputs=[comic_log])
+
+            # ── Touchup sub-tab ───────────────────────────────────────────
+            with gr.Tab("Touchup"):
+                from comic.ui_touchup import build_touchup_tab
+                build_touchup_tab(build_adetailer_block)
 
             # ── Assembly sub-tab ──────────────────────────────────────────
             with gr.Tab("Assembly"):
@@ -1195,7 +1231,11 @@ def create_comic_tab():
 
                     with gr.Column():
                         asm_log = gr.Textbox(label="Status", lines=4, interactive=False)
-                        asm_gallery = gr.Gallery(label="Assembled Pages", columns=2, height=500)
+                        asm_gallery = gr.Gallery(
+                            label="Assembled Pages", columns=2, height=500,
+                            preview=True, allow_preview=True, object_fit="contain",
+                            elem_id="asm_gallery",
+                        )
 
                 asm_btn.click(
                     fn=_assemble_standalone,
