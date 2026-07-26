@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
+from . import text_styles
+
 
 # -- config -----------------------------------------------------------------
 
@@ -30,135 +32,492 @@ SCRIPT_BG = (10, 10, 15)
 
 # -- fonts ------------------------------------------------------------------
 
-def get_font(size: int, bold: bool = False):
-    """Try to load a decent font, fall back to default."""
-    if bold:
-        candidates = [
-            "C:/Windows/Fonts/calibrib.ttf",
-            "C:/Windows/Fonts/arialbd.ttf",
-            "C:/Windows/Fonts/segoeuib.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        ]
-    else:
-        candidates = [
-            "C:/Windows/Fonts/calibri.ttf",
-            "C:/Windows/Fonts/arial.ttf",
-            "C:/Windows/Fonts/segoeui.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        ]
-    for fp in candidates:
-        if os.path.isfile(fp):
-            try:
-                return ImageFont.truetype(fp, size)
-            except Exception:
-                continue
+def get_font(size: int, bold: bool = False, family: str = "sans"):
+    """Load a logical lettering font family, with a safe PIL fallback."""
+    font_path = text_styles.resolve_font_path(family, bold=bold)
+    if font_path:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except (OSError, ValueError):
+            pass
     return ImageFont.load_default()
 
 
-FONT_CAPTION = get_font(32, bold=False)
-FONT_DIALOGUE = get_font(30, bold=False)
-FONT_LABEL = get_font(22, bold=True)
+FONT_CAPTION = get_font(32, bold=False, family="serif")
+FONT_DIALOGUE = get_font(30, bold=False, family="comic")
+FONT_LABEL = get_font(22, bold=True, family="sans")
 
 _font_cache: Dict = {}
 
 
-def _scaled_font(base_size: int, panel_w: int, bold: bool = False):
+def _scaled_font(base_size: int, panel_w: int, bold: bool = False,
+                 family: str = "sans"):
     """Get a font scaled to panel width. Base sizes designed for ~1200px panels."""
-    size = max(16, min(52, int(base_size * panel_w / 1200)))
-    key = (size, bold)
+    size = max(8, min(240, int(base_size * panel_w / 1200)))
+    key = (size, bold, family)
     if key not in _font_cache:
-        _font_cache[key] = get_font(size, bold)
+        _font_cache[key] = get_font(size, bold, family)
     return _font_cache[key]
 
 
 # -- drawing helpers --------------------------------------------------------
 
 def wrap_text(text: str, font, max_width: int, draw: ImageDraw.Draw) -> List[str]:
-    """Word-wrap text to fit within max_width pixels."""
-    words = text.split()
-    lines = []
-    current = ""
-    for word in words:
-        test = f"{current} {word}".strip()
-        bbox = draw.textbbox((0, 0), test, font=font)
-        if bbox[2] - bbox[0] <= max_width:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
+    """Wrap text to a pixel width, including newlines and long sound words."""
+    max_width = max(1, int(max_width))
+
+    def width(value: str) -> int:
+        bbox = draw.textbbox((0, 0), value, font=font)
+        return bbox[2] - bbox[0]
+
+    def split_long_word(word: str) -> List[str]:
+        chunks: List[str] = []
+        chunk = ""
+        for char in word:
+            candidate = chunk + char
+            if chunk and width(candidate) > max_width:
+                chunks.append(chunk)
+                chunk = char
+            else:
+                chunk = candidate
+        if chunk:
+            chunks.append(chunk)
+        return chunks or [word]
+
+    lines: List[str] = []
+    paragraphs = str(text).splitlines() or [""]
+    for paragraph in paragraphs:
+        if not paragraph.strip():
+            lines.append("")
+            continue
+        current = ""
+        for word in paragraph.split():
+            pieces = split_long_word(word) if width(word) > max_width else [word]
+            for piece in pieces:
+                candidate = f"{current} {piece}".strip()
+                if not current or width(candidate) <= max_width:
+                    current = candidate
+                else:
+                    lines.append(current)
+                    current = piece
+        if current:
+            lines.append(current)
     return lines or [""]
 
 
-def draw_caption_overlay(panel: Image.Image, text: str, font=None):
-    """Draw a dark translucent caption bar at the top of a panel image."""
-    if font is None:
-        font = FONT_CAPTION
-    draw = ImageDraw.Draw(panel)
-    pw = panel.width
-    padding = 16
-    line_h = int(font.size * 1.2) if hasattr(font, 'size') else 38
+# -- shape drawing ----------------------------------------------------------
 
-    lines = wrap_text(text, font, pw - padding * 2, draw)
-    box_h = padding * 2 + line_h * len(lines)
+def _draw_box_shape(odraw: ImageDraw.ImageDraw, box, spec: Dict):
+    """Draw a bubble/box silhouette for the given style spec inside `box`."""
+    x0, y0, x1, y1 = box
+    fill = tuple(spec["fill"])
+    outline = tuple(spec["outline"])
+    ow = int(spec.get("outline_width", 0))
+    radius = int(spec.get("radius", 0))
+    shape = spec["shape"]
 
-    overlay = Image.new("RGBA", (pw, box_h), (10, 10, 20, 200))
-    panel.paste(Image.alpha_composite(
-        Image.new("RGBA", (pw, box_h), (0, 0, 0, 0)), overlay
-    ), (0, 0))
+    if shape == "plain":
+        return  # text-only (SFX); no silhouette
 
-    draw = ImageDraw.Draw(panel)
-    ty = padding
+    if shape in ("rect",):
+        odraw.rectangle([x0, y0, x1, y1], fill=fill,
+                        outline=outline if ow else None, width=max(ow, 1))
+
+    elif shape in ("rounded", "dashed"):
+        odraw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=fill,
+                                outline=outline if ow else None, width=max(ow, 1))
+        if shape == "dashed":
+            # overlay a dashed border on top of the (already drawn) solid one
+            odraw.rounded_rectangle([x0, y0, x1, y1], radius=radius,
+                                    fill=fill, outline=None)
+            _dashed_round_border(odraw, box, radius, outline, max(ow, 1))
+
+    elif shape == "cloud":
+        _draw_cloud(odraw, box, fill, outline, max(ow, 1))
+
+    elif shape == "spiky":
+        _draw_spiky(odraw, box, fill, outline, max(ow, 1))
+
+
+def _dashed_round_border(odraw, box, radius, outline, width, dash=14, gap=10):
+    """Draw dashed straight edges with connected rounded corners."""
+    x0, y0, x1, y1 = box
+    radius = max(width, radius)
+    dash = max(4, min(dash, radius))
+    gap = max(3, min(gap, radius))
+
+    def dashed_line(p0, p1):
+        import math
+        x_a, y_a = p0
+        x_b, y_b = p1
+        length = math.hypot(x_b - x_a, y_b - y_a)
+        if length == 0:
+            return
+        ux, uy = (x_b - x_a) / length, (y_b - y_a) / length
+        d = 0.0
+        while d < length:
+            sx, sy = x_a + ux * d, y_a + uy * d
+            e = min(d + dash, length)
+            ex, ey = x_a + ux * e, y_a + uy * e
+            odraw.line([sx, sy, ex, ey], fill=outline, width=width)
+            d += dash + gap
+
+    dashed_line((x0 + radius, y0), (x1 - radius, y0))
+    dashed_line((x1, y0 + radius), (x1, y1 - radius))
+    dashed_line((x1 - radius, y1), (x0 + radius, y1))
+    dashed_line((x0, y1 - radius), (x0, y0 + radius))
+    diameter = radius * 2
+    odraw.arc((x0, y0, x0 + diameter, y0 + diameter), 180, 270, fill=outline, width=width)
+    odraw.arc((x1 - diameter, y0, x1, y0 + diameter), 270, 360, fill=outline, width=width)
+    odraw.arc((x1 - diameter, y1 - diameter, x1, y1), 0, 90, fill=outline, width=width)
+    odraw.arc((x0, y1 - diameter, x0 + diameter, y1), 90, 180, fill=outline, width=width)
+
+
+def _draw_cloud(odraw, box, fill, outline, ow):
+    """Scalloped 'thought cloud' from overlapping bumps around a core.
+
+    Drawn outline-first (a slightly larger silhouette in the outline colour),
+    then the fill on top, so only the outer contour shows — no internal seams.
+    """
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    bump = max(18, min(w, h) // 4)
+    r = bump // 2
+    centres = []
+    nx = max(3, int(round(w / bump)))
+    ny = max(2, int(round(h / bump)))
+    for i in range(nx + 1):
+        cx = x0 + i * w / nx
+        centres.append((cx, y0)); centres.append((cx, y1))
+    for j in range(1, ny):
+        cy = y0 + j * h / ny
+        centres.append((x0, cy)); centres.append((x1, cy))
+
+    def silhouette(radius, col):
+        for cx, cy in centres:
+            odraw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=col)
+        odraw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=col)
+
+    if ow:
+        silhouette(r + ow, outline)   # outline layer (slightly larger)
+    silhouette(r, fill)               # fill layer on top hides inner seams
+
+
+def _draw_spiky(odraw, box, fill, outline, ow):
+    """Jagged 'shout' burst as a star polygon around the box ellipse."""
+    import math
+    x0, y0, x1, y1 = box
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    rx, ry = (x1 - x0) / 2, (y1 - y0) / 2
+    spikes = max(12, int((x1 - x0) / 34))
+
+    def burst(scale):
+        pts = []
+        for k in range(spikes * 2):
+            ang = math.pi * k / spikes
+            rad = scale if k % 2 == 0 else scale * 0.74
+            pts.append((cx + math.cos(ang) * rx * rad,
+                        cy + math.sin(ang) * ry * rad))
+        return pts
+
+    if ow:
+        odraw.polygon(burst(1.06), fill=outline)  # outline layer
+    odraw.polygon(burst(1.0), fill=fill)          # fill layer on top
+
+
+def _draw_tail(odraw, box, spec: Dict, anchor: str):
+    """Draw a scale-aware tail pointing from the bubble into the panel."""
+    x0, y0, x1, y1 = box
+    kind = spec.get("tail", "none")
+    if kind == "none":
+        return
+    fill = tuple(spec["fill"])
+    outline = tuple(spec["outline"])
+    ow = max(int(spec.get("outline_width", 0)), 1)
+    scale = max(0.35, _as_float(spec.get("_scale"), 1))
+    tail_len = max(8, int(round(22 * scale)))
+    base_w = max(9, int(round(26 * scale)))
+    inset = max(3, int(round(4 * scale)))
+    if anchor.startswith("top"):
+        base_y, direction = y1, 1
+    elif anchor.startswith("bottom"):
+        base_y, direction = y0, -1
+    else:
+        base_y, direction = y1, 1
+    tip_y = base_y + tail_len * direction
+    cx = x0 + (x1 - x0) * (0.7 if "right" in anchor else 0.28)
+
+    if kind == "triangle":
+        pts = [(cx, base_y), (cx + base_w, base_y), (cx + inset, tip_y)]
+        odraw.polygon(pts, fill=fill, outline=outline)
+        odraw.line([(cx, base_y), (cx + base_w, base_y)], fill=fill, width=ow + 1)
+    elif kind == "jagged":
+        mid = max(4, int(round(10 * scale)))
+        pts = [
+            (cx, base_y), (cx + base_w, base_y),
+            (cx + int(base_w * 0.7), tip_y),
+            (cx + int(base_w * 0.35), base_y + mid * direction),
+            (cx, tip_y),
+        ]
+        odraw.polygon(pts, fill=fill, outline=outline)
+    elif kind == "dots":
+        step = max(7, int(round(18 * scale))) * direction
+        radius = max(3, int(round(9 * scale)))
+        dy = base_y + step
+        for shrink in (radius, max(2, int(radius * 0.7)), max(1, int(radius * 0.45))):
+            odraw.ellipse(
+                [cx - shrink, dy - shrink, cx + shrink, dy + shrink],
+                fill=fill, outline=outline, width=ow,
+            )
+            dy += step
+            cx += max(2, int(round(6 * scale)))
+
+
+# -- text element engine ----------------------------------------------------
+
+REF_PANEL_W = 1200  # font/padding sizes are authored against a 1200px panel
+
+
+def _as_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _parse_color(value, fallback):
+    """Accept #RGB/#RRGGBB or an RGB(A) sequence; otherwise use fallback."""
+    if isinstance(value, str):
+        raw = value.strip().lstrip("#")
+        if len(raw) == 3 and all(char in "0123456789abcdefABCDEF" for char in raw):
+            raw = "".join(char * 2 for char in raw)
+        if len(raw) == 6 and all(char in "0123456789abcdefABCDEF" for char in raw):
+            return tuple(int(raw[index:index + 2], 16) for index in (0, 2, 4))
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            rgb = tuple(max(0, min(255, int(channel))) for channel in value[:3])
+            if len(value) >= 4:
+                return rgb + (max(0, min(255, int(value[3]))),)
+            return rgb
+        except (TypeError, ValueError):
+            pass
+    return tuple(fallback)
+
+
+def draw_text_element(panel: Image.Image, text: str, spec: Dict, *,
+                      anchor: str, offset=(0, 0), width_frac: float = 0.7,
+                      font_px: int = 30, font_family: str = "sans",
+                      rotation: float = 0):
+    """Render one styled, positioned lettering layer onto ``panel``.
+
+    Sizes are authored at a 1200px reference width. Rotation is clockwise.
+    The image is modified in place and may be RGB or RGBA.
+    """
+    if not text or not str(text).strip():
+        return
+    pw, ph = panel.size
+    raw = str(text)
+    if spec.get("all_caps"):
+        raw = raw.upper()
+
+    scale = pw / REF_PANEL_W
+    render_spec = dict(spec)
+    render_spec["_scale"] = scale
+    for key in ("radius", "outline_width", "text_stroke"):
+        authored = max(0, int(_as_float(render_spec.get(key, 0), 0)))
+        render_spec[key] = max(1, int(round(authored * scale))) if authored else 0
+
+    font_px = int(max(8, min(240, _as_float(font_px, 30))))
+    font = _scaled_font(
+        font_px, pw, bold=bool(render_spec.get("bold", False)),
+        family=font_family or render_spec.get("font_family", "sans"),
+    )
+    padding = max(4, int(_as_float(render_spec.get("padding", 16), 16) * scale))
+    try:
+        font_height = font.size
+    except AttributeError:
+        bbox = ImageDraw.Draw(panel).textbbox((0, 0), "Ag", font=font)
+        font_height = max(8, bbox[3] - bbox[1])
+    line_h = max(1, int(font_height * 1.25))
+
+    width_frac = max(0.15, min(1.0, _as_float(width_frac, 0.7)))
+    full_width = width_frac >= 0.98
+    box_w = pw if full_width else int(width_frac * pw)
+
+    shape = render_spec.get("shape", "rounded")
+    tmp = ImageDraw.Draw(panel)
+    inner = max(1, box_w - padding * 2)
+    if shape == "plain":
+        wrap_w = box_w
+    elif shape in ("cloud", "spiky"):
+        wrap_w = max(1, int(inner * 0.78))
+    else:
+        wrap_w = inner
+    lines = wrap_text(raw, font, wrap_w, tmp)
+    text_h = line_h * len(lines)
+    box_h = text_h + padding * 2
+    if shape in ("cloud", "spiky"):
+        box_h = max(box_h, int(box_w * 0.42))
+
+    pad_shape = 0
+    if shape == "cloud":
+        pad_shape = int(min(box_w, box_h) // 5)
+    elif shape == "spiky":
+        pad_shape = int(box_w * 0.12)
+    slot_w = box_w + pad_shape * 2
+    slot_h = box_h + pad_shape * 2
+
+    anchor = text_styles.normalize_anchor(
+        anchor, render_spec.get("default_anchor", "bottom-center")
+    )
+    margin = 0 if full_width else max(8, int(20 * scale))
+    parts = anchor.split("-")
+    vert, horiz = (parts[0], parts[1]) if len(parts) == 2 else ("center", "center")
+
+    if horiz == "left":
+        x = margin
+    elif horiz == "right":
+        x = pw - slot_w - margin
+    else:
+        x = (pw - slot_w) // 2
+    if vert == "top":
+        y = margin
+    elif vert == "bottom":
+        y = ph - slot_h - margin
+    else:
+        y = (ph - slot_h) // 2
+
+    if not isinstance(offset, (list, tuple)) or len(offset) != 2:
+        offset = (0, 0)
+    x += int(_as_float(offset[0], 0) / 100.0 * pw)
+    y += int(_as_float(offset[1], 0) / 100.0 * ph)
+    x = max(-pad_shape, min(x, pw - slot_w + pad_shape))
+    y = max(-pad_shape, min(y, ph - slot_h + pad_shape))
+
+    box = (
+        int(x + pad_shape), int(y + pad_shape),
+        int(x + pad_shape + box_w), int(y + pad_shape + box_h),
+    )
+
+    layer = Image.new("RGBA", (pw, ph), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    _draw_box_shape(draw, box, render_spec)
+    _draw_tail(draw, box, render_spec, anchor)
+
+    tfill = tuple(render_spec.get("text_fill", (15, 15, 15)))
+    stroke = int(render_spec.get("text_stroke", 0))
+    stroke_fill = tuple(render_spec.get("text_stroke_fill", (0, 0, 0)))
+    centred = shape in ("cloud", "spiky", "plain")
+    tx = box[0] + padding
+    ty = box[1] + ((box_h - text_h) // 2 if centred else padding)
     for line in lines:
-        draw.text((padding, ty), line, fill=(230, 225, 210), font=font)
+        if centred:
+            line_box = draw.textbbox((0, 0), line, font=font, stroke_width=stroke)
+            line_w = line_box[2] - line_box[0]
+            lx = box[0] + (box_w - line_w) // 2
+        else:
+            lx = tx
+        draw.text(
+            (lx, ty), line, fill=tfill, font=font,
+            stroke_width=stroke, stroke_fill=stroke_fill,
+        )
         ty += line_h
+
+    angle = max(-45.0, min(45.0, _as_float(rotation, 0)))
+    if angle:
+        centre = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+        layer = layer.rotate(-angle, resample=Image.BICUBIC, center=centre)
+
+    base = panel if panel.mode == "RGBA" else panel.convert("RGBA")
+    base.alpha_composite(layer)
+    if base is not panel:
+        panel.paste(base.convert(panel.mode))
+
+
+def _resolve_and_draw(panel: Image.Image, data: Dict, key: str):
+    """Resolve a legacy caption/dialogue field and render it safely."""
+    text = data.get(key, "")
+    if not text or not str(text).strip() or str(text).strip() == "...":
+        return
+    default_style = (
+        text_styles.CAPTION_DEFAULT if key == "caption"
+        else text_styles.DIALOGUE_DEFAULT
+    )
+    spec = text_styles.get_style(data.get(f"{key}_style"), fallback=default_style)
+    spec["text_fill"] = _parse_color(
+        data.get(f"{key}_color"), spec.get("text_fill", (15, 15, 15))
+    )
+    spec["text_stroke_fill"] = _parse_color(
+        data.get(f"{key}_outline_color"), spec.get("text_stroke_fill", (0, 0, 0))
+    )
+    anchor = data.get(f"{key}_anchor") or spec["default_anchor"]
+
+    width = data.get(f"{key}_width")
+    if width in (None, "", 0):
+        width_frac = spec["default_width"]
+    else:
+        width_value = _as_float(width, spec["default_width"])
+        width_frac = width_value / 100.0 if width_value > 1.5 else width_value
+
+    offset = data.get(f"{key}_offset") or (0, 0)
+    font_px = data.get(f"{key}_font_size") or spec["default_font"]
+    font_family = data.get(f"{key}_font") or spec.get("font_family", "sans")
+    rotation = data.get(f"{key}_rotation", spec.get("default_rotation", 0))
+
+    draw_text_element(
+        panel, text, spec, anchor=anchor, offset=offset,
+        width_frac=width_frac, font_px=int(_as_float(font_px, spec["default_font"])),
+        font_family=font_family, rotation=rotation,
+    )
+
+
+def _draw_extra_lettering(panel: Image.Image, element: Dict):
+    """Render one item from a panel's independent ``lettering`` list."""
+    if not isinstance(element, dict):
+        return
+    text = element.get("text", "")
+    if not text or not str(text).strip():
+        return
+    spec = text_styles.get_style(element.get("style"), text_styles.EFFECT_DEFAULT)
+    spec["text_fill"] = _parse_color(
+        element.get("color"), spec.get("text_fill", (15, 15, 15))
+    )
+    spec["text_stroke_fill"] = _parse_color(
+        element.get("outline_color"), spec.get("text_stroke_fill", (0, 0, 0))
+    )
+    width = _as_float(element.get("width"), spec["default_width"])
+    width_frac = width / 100.0 if width > 1.5 else width
+    draw_text_element(
+        panel, text, spec,
+        anchor=element.get("anchor") or spec["default_anchor"],
+        offset=element.get("offset") or (0, 0),
+        width_frac=width_frac,
+        font_px=int(_as_float(element.get("font_size"), spec["default_font"])),
+        font_family=element.get("font") or spec.get("font_family", "sans"),
+        rotation=element.get("rotation", spec.get("default_rotation", 0)),
+    )
+
+
+def render_panel_lettering(panel: Image.Image, data: Dict):
+    """Render caption, dialogue, then any number of independent extra layers."""
+    _resolve_and_draw(panel, data, "caption")
+    _resolve_and_draw(panel, data, "dialogue")
+    lettering = data.get("lettering", [])
+    if isinstance(lettering, list):
+        for element in lettering:
+            _draw_extra_lettering(panel, element)
+
+
+# -- legacy wrappers (kept for callers that pass plain text) ----------------
+
+def draw_caption_overlay(panel: Image.Image, text: str, font=None):
+    """Backward-compatible default narration bar."""
+    _resolve_and_draw(panel, {"caption": text}, "caption")
 
 
 def draw_dialogue_overlay(panel: Image.Image, text: str, font=None):
-    """Draw a white speech bubble overlaid at the bottom of a panel image."""
-    if font is None:
-        font = FONT_DIALOGUE
-    pw, ph = panel.size
-    padding = 16
-    line_h = int(font.size * 1.2) if hasattr(font, 'size') else 36
-    margin_x = 40
-    margin_bottom = 30
-
-    tmp_draw = ImageDraw.Draw(panel)
-    bub_w = pw - margin_x * 2
-    lines = wrap_text(text, font, bub_w - padding * 2, tmp_draw)
-    bub_h = padding * 2 + line_h * len(lines)
-
-    bub_x = margin_x
-    bub_y = ph - bub_h - margin_bottom
-
-    overlay = Image.new("RGBA", (pw, ph), (0, 0, 0, 0))
-    odraw = ImageDraw.Draw(overlay)
-
-    odraw.rounded_rectangle(
-        [(bub_x, bub_y), (bub_x + bub_w, bub_y + bub_h)],
-        radius=16, fill=(255, 255, 255, 220), outline=(30, 30, 30, 180), width=3
-    )
-    # tail
-    tail_cx = bub_x + bub_w // 3
-    tail_pts = [
-        (tail_cx, bub_y + bub_h),
-        (tail_cx + 12, bub_y + bub_h + 18),
-        (tail_cx + 28, bub_y + bub_h),
-    ]
-    odraw.polygon(tail_pts, fill=(255, 255, 255, 220), outline=(30, 30, 30, 180))
-
-    panel_composite = Image.alpha_composite(panel, overlay)
-    panel.paste(panel_composite)
-
-    draw = ImageDraw.Draw(panel)
-    ty = bub_y + padding
-    for line in lines:
-        draw.text((bub_x + padding, ty), line, fill=(15, 15, 15), font=font)
-        ty += line_h
-
+    """Backward-compatible default speech bubble."""
+    _resolve_and_draw(panel, {"dialogue": text}, "dialogue")
 
 # -- image fitting ----------------------------------------------------------
 
@@ -453,13 +812,7 @@ def build_panel(img_path: Optional[str], frame: Dict, panel_w: int) -> Image.Ima
         d.text((panel_w // 4, new_h // 2), "[ missing ]",
                fill=(100, 100, 100), font=FONT_LABEL)
 
-    caption = frame.get("caption", "")
-    dialogue = frame.get("dialogue", "")
-
-    if caption:
-        draw_caption_overlay(im, caption)
-    if dialogue:
-        draw_dialogue_overlay(im, dialogue)
+    render_panel_lettering(im, frame)
 
     return im
 
@@ -478,15 +831,7 @@ def build_script_panel(img_path: Optional[str], panel: Dict,
         d.text((slot_w // 4, slot_h // 2), f"[ {label} missing ]",
                fill=(100, 100, 100), font=lbl_font)
 
-    caption = panel.get("caption", "")
-    dialogue = panel.get("dialogue", "")
-
-    if caption and caption.strip() and caption.strip() != "...":
-        cap_font = _scaled_font(32, slot_w)
-        draw_caption_overlay(im, caption, font=cap_font)
-    if dialogue and dialogue.strip() and dialogue.strip() != "...":
-        dlg_font = _scaled_font(30, slot_w)
-        draw_dialogue_overlay(im, dialogue, font=dlg_font)
+    render_panel_lettering(im, panel)
 
     return im
 

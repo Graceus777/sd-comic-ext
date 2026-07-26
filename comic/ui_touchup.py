@@ -11,6 +11,7 @@ compatibility; unused cards stay hidden).
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shutil
@@ -452,14 +453,20 @@ def build_touchup_tab(build_adetailer_block):
             with gr.Group(visible=False) as g:
                 with gr.Row():
                     with gr.Column(scale=1):
-                        img = gr.Image(
-                            label=f"Panel {i+1}",
-                            type="pil",
-                            tool="sketch",
-                            source="upload",
-                            height=640,
-                            interactive=True,
-                        )
+                        image_kwargs = {
+                            "label": f"Panel {i+1}",
+                            "type": "pil",
+                            "height": 640,
+                            "interactive": True,
+                        }
+                        image_params = inspect.signature(gr.Image.__init__).parameters
+                        if "tool" in image_params:
+                            image_kwargs["tool"] = "sketch"
+                        if "source" in image_params:
+                            image_kwargs["source"] = "upload"
+                        elif "sources" in image_params:
+                            image_kwargs["sources"] = ["upload"]
+                        img = gr.Image(**image_kwargs)
                     with gr.Column(scale=2):
                         lbl = gr.Markdown(value="")
                         status = gr.Radio(

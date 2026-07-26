@@ -1,9 +1,11 @@
 """
 Gradio UI for the Comic Generator tab.
 
-Two sub-tabs:
-  1. Comic — JSON editor for authored scripts, generate panels, assemble pages
-  2. Assembly — standalone re-assembly from existing images, export PDF/CBZ
+Sub-tabs:
+  1. Comic — JSON editor for authored scripts, generation, and assembly
+  2. Font Editor — visual font, bubble, caption, and sound-effect editor
+  3. Touchup — panel review and selective regeneration
+  4. Assembly — standalone re-assembly and PDF/CBZ export
 
 Strip scripts are available via the Comic tab's "Load script file" dropdown
 (select an "(Example)" preset or load a saved strip script JSON directly).
@@ -15,9 +17,13 @@ from typing import List, Optional
 
 import gradio as gr
 
+from PIL import Image, ImageDraw
+
 from comic.shared import EXT_DIR, STRIPS_DIR, DEFAULT_CONFIG
 from comic import comic_engine
 from comic import assembler
+from comic import text_styles
+from comic import lettering
 from comic.prompt_builder import validate_camera_continuity
 from comic.ui_wizard import (
     _build_template,
@@ -81,6 +87,23 @@ SHOT_TYPES = [
     "extreme_close_up", "low_angle", "high_angle", "from_behind",
     "side_profile", "insert",
 ]
+
+# Text-bubble styling choices for the panel form. The "(style default)" anchor
+# option leaves placement to the chosen style's own default.
+DIALOGUE_STYLE_CHOICES = text_styles.style_choices(text_styles.DIALOGUE_STYLE_NAMES)
+CAPTION_STYLE_CHOICES = text_styles.style_choices(text_styles.CAPTION_STYLE_NAMES)
+ALL_STYLE_CHOICES = text_styles.style_choices(text_styles.ALL_STYLE_NAMES)
+FONT_CHOICES = text_styles.font_choices()
+ANCHOR_CHOICES = [("(style default)", "")] + [(a, a) for a in text_styles.ANCHORS]
+LETTER_ANCHOR_CHOICES = [(anchor, anchor) for anchor in text_styles.ANCHORS]
+
+# Fields collected per panel from the form, in order, and chunked back out in
+# _add_page_to_script. Keep this list and the accordion controls in sync.
+PANEL_FIELD_ORDER = [
+    "scene", "shot", "dialogue", "caption", "pos", "neg", "no_char", "char_key",
+    "dialogue_style", "dialogue_anchor", "caption_style", "caption_anchor",
+]
+PANEL_FIELD_COUNT = len(PANEL_FIELD_ORDER)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -641,21 +664,11 @@ def _assemble_comic_pages(json_str, image_dir, page_width):
 # BUILD PAGE HELPER
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _add_page_to_script(
-    json_str: str,
-    layout: str,
-    # Panel 1
-    scene1: str, shot1: str, dialogue1: str, caption1: str, pos1: str, neg1: str, no_char1: bool, char_key1: str,
-    # Panel 2
-    scene2: str, shot2: str, dialogue2: str, caption2: str, pos2: str, neg2: str, no_char2: bool, char_key2: str,
-    # Panel 3
-    scene3: str, shot3: str, dialogue3: str, caption3: str, pos3: str, neg3: str, no_char3: bool, char_key3: str,
-    # Panel 4
-    scene4: str, shot4: str, dialogue4: str, caption4: str, pos4: str, neg4: str, no_char4: bool, char_key4: str,
-) -> tuple:
+def _add_page_to_script(json_str: str, layout: str, *panel_args) -> tuple:
     """Append a new page to the active comic script JSON.
 
-    Returns (updated_json_str, status_message).
+    `panel_args` is the flattened per-panel form data, PANEL_FIELD_COUNT values
+    per panel in PANEL_FIELD_ORDER. Returns (updated_json_str, status_message).
     """
     count = LAYOUT_PANEL_COUNTS.get(layout, 1)
 
@@ -678,32 +691,48 @@ def _add_page_to_script(
 
     page_num = len(script["pages"]) + 1
 
-    raw_panels = [
-        (scene1, shot1, dialogue1, caption1, pos1, neg1, no_char1, char_key1),
-        (scene2, shot2, dialogue2, caption2, pos2, neg2, no_char2, char_key2),
-        (scene3, shot3, dialogue3, caption3, pos3, neg3, no_char3, char_key3),
-        (scene4, shot4, dialogue4, caption4, pos4, neg4, no_char4, char_key4),
-    ]
+    # chunk the flat args back into one dict per panel
+    raw_panels = []
+    for i in range(0, len(panel_args), PANEL_FIELD_COUNT):
+        chunk = panel_args[i:i + PANEL_FIELD_COUNT]
+        raw_panels.append(dict(zip(PANEL_FIELD_ORDER, chunk)))
 
     panels = []
     for i in range(count):
-        scene, shot, dialogue, caption, pos_extra, neg_extra, no_char, char_key = raw_panels[i]
+        p = raw_panels[i]
+        scene = p.get("scene")
         panel: dict = {
             "id": f"p{page_num:02d}{i + 1:02d}",
             "scene": scene.strip() if scene and scene.strip()
                      else f"PANEL {i + 1} — [describe what the camera sees]",
-            "shot": shot or "medium",
+            "shot": p.get("shot") or "medium",
         }
-        if no_char:
+        if p.get("no_char"):
             panel["no_character"] = True
-        elif char_key and char_key.strip():
-            panel["character"] = char_key.strip()
+        elif p.get("char_key") and p["char_key"].strip():
+            panel["character"] = p["char_key"].strip()
+
+        dialogue = p.get("dialogue")
         if dialogue and dialogue.strip():
             panel["dialogue"] = dialogue.strip()
+            # only record styling that departs from the default look
+            if p.get("dialogue_style") and p["dialogue_style"] != text_styles.DIALOGUE_DEFAULT:
+                panel["dialogue_style"] = p["dialogue_style"]
+            if p.get("dialogue_anchor"):
+                panel["dialogue_anchor"] = p["dialogue_anchor"]
+
+        caption = p.get("caption")
         if caption and caption.strip():
             panel["caption"] = caption.strip()
+            if p.get("caption_style") and p["caption_style"] != text_styles.CAPTION_DEFAULT:
+                panel["caption_style"] = p["caption_style"]
+            if p.get("caption_anchor"):
+                panel["caption_anchor"] = p["caption_anchor"]
+
+        pos_extra = p.get("pos")
         if pos_extra and pos_extra.strip():
             panel["positive_extra"] = pos_extra.strip()
+        neg_extra = p.get("neg")
         if neg_extra and neg_extra.strip():
             panel["negative_extra"] = neg_extra.strip()
         panels.append(panel)
@@ -713,6 +742,189 @@ def _add_page_to_script(
     updated = json.dumps(script, indent=2, ensure_ascii=False)
     return updated, f"Added page {page_num} ({layout}, {count} panel{'s' if count > 1 else ''})"
 
+
+# ---------------------------------------------------------------------------
+# LETTERING EDITOR HELPERS
+# ---------------------------------------------------------------------------
+
+LETTER_CONTROL_FIELDS = [
+    "text", "style", "font", "anchor", "x", "y", "width", "font_size",
+    "rotation", "color", "outline_color",
+]
+
+
+def _letter_values(*values):
+    return dict(zip(LETTER_CONTROL_FIELDS, values))
+
+
+def _letter_refresh_panels(json_str):
+    try:
+        script = lettering.parse_script(json_str)
+        choices = lettering.panel_choices(script)
+        if not choices:
+            return gr.update(choices=[], value=None), "No panels found in the script"
+        return (
+            gr.update(choices=choices, value=choices[0][1]),
+            f"Loaded {len(choices)} panel{'s' if len(choices) != 1 else ''}",
+        )
+    except ValueError as exc:
+        return gr.update(choices=[], value=None), str(exc)
+
+
+def _letter_refresh_layers(json_str, panel_ref):
+    try:
+        script = lettering.parse_script(json_str)
+        _, panel, _, _ = lettering.get_panel(script, panel_ref)
+        choices = lettering.layer_choices(panel)
+        value = choices[0][1] if choices else None
+        return gr.update(choices=choices, value=value), "Select a layer, then click Load Layer"
+    except ValueError as exc:
+        return gr.update(choices=[], value=None), str(exc)
+
+
+def _letter_load_layer(json_str, panel_ref, layer_ref):
+    try:
+        script = lettering.parse_script(json_str)
+        _, panel, _, _ = lettering.get_panel(script, panel_ref)
+        values = lettering.layer_values(panel, layer_ref)
+        return tuple(values[field] for field in LETTER_CONTROL_FIELDS) + ("Layer loaded",)
+    except ValueError as exc:
+        return tuple(gr.update() for _ in LETTER_CONTROL_FIELDS) + (str(exc),)
+
+
+def _letter_preset_defaults(style_name):
+    values = lettering.style_defaults(style_name)
+    return (
+        values["font"], values["anchor"], values["width"],
+        values["font_size"], values["rotation"], values["color"],
+        values["outline_color"],
+    )
+
+
+def _letter_source_image(source_image):
+    if source_image is None:
+        return None
+    if isinstance(source_image, Image.Image):
+        return source_image.convert("RGBA")
+    if isinstance(source_image, str) and os.path.isfile(source_image):
+        with Image.open(source_image) as image:
+            return image.convert("RGBA")
+    try:
+        return Image.fromarray(source_image).convert("RGBA")
+    except Exception:
+        return None
+
+
+def _render_lettering_preview(json_str, panel_ref, image_dir, source_image):
+    script = lettering.parse_script(json_str)
+    page, panel, _, panel_index = lettering.get_panel(script, panel_ref)
+    panels = page.get("panels", [])
+    slots, _ = assembler.compute_layout(
+        page.get("layout", "two_row"), 1160, 10, len(panels)
+    )
+    if panel_index < len(slots):
+        _, _, slot_w, slot_h = slots[panel_index]
+        ratio = slot_h / max(1, slot_w)
+    else:
+        ratio = 1.25
+    preview_w = 1000
+    preview_h = max(300, min(1800, int(preview_w * ratio)))
+
+    image = _letter_source_image(source_image)
+    source_note = "uploaded image"
+    if image is None:
+        title_tag = comic_engine.make_title_tag(script.get("title", "untitled"))
+        directory = str(image_dir or "").strip()
+        if not directory:
+            directory = os.path.join("comics", title_tag, "pages")
+        image_path = assembler.find_script_panel_image(panel, [directory], title_tag)
+        if image_path:
+            with Image.open(image_path) as found:
+                image = found.convert("RGBA")
+            source_note = os.path.basename(image_path)
+        else:
+            image = Image.new("RGBA", (preview_w, preview_h), (54, 57, 68, 255))
+            grid = ImageDraw.Draw(image)
+            for x in range(0, preview_w, 100):
+                grid.line((x, 0, x, preview_h), fill=(70, 74, 88, 255), width=2)
+            for y in range(0, preview_h, 100):
+                grid.line((0, y, preview_w, y), fill=(70, 74, 88, 255), width=2)
+            grid.text((24, 24), "Panel image not found - placement preview", fill=(210, 214, 225, 255))
+            source_note = "placement grid (panel image not found)"
+
+    image = assembler.fit_image_to_slot(image, preview_w, preview_h)
+    assembler.render_panel_lettering(image, panel)
+    return image.convert("RGB"), source_note
+
+
+def _letter_preview(json_str, panel_ref, layer_ref, image_dir, source_image, *controls):
+    try:
+        candidate, _ = lettering.update_json(
+            json_str, panel_ref, layer_ref, _letter_values(*controls)
+        )
+        image, note = _render_lettering_preview(
+            candidate, panel_ref, image_dir, source_image
+        )
+        return image, f"Previewing on {note}; script has not been changed"
+    except (ValueError, OSError) as exc:
+        return None, str(exc)
+
+
+def _updated_layer_choices(json_str, panel_ref, selected):
+    script = lettering.parse_script(json_str)
+    _, panel, _, _ = lettering.get_panel(script, panel_ref)
+    choices = lettering.layer_choices(panel)
+    values = [value for _, value in choices]
+    if selected not in values:
+        selected = values[0] if values else None
+    return gr.update(choices=choices, value=selected)
+
+
+def _letter_apply(json_str, panel_ref, layer_ref, image_dir, source_image, *controls):
+    try:
+        updated, selected = lettering.update_json(
+            json_str, panel_ref, layer_ref, _letter_values(*controls)
+        )
+        image, note = _render_lettering_preview(
+            updated, panel_ref, image_dir, source_image
+        )
+        return (
+            updated, _updated_layer_choices(updated, panel_ref, selected),
+            f"Lettering saved to the script; preview source: {note}", image,
+        )
+    except (ValueError, OSError) as exc:
+        return json_str, gr.update(), str(exc), None
+
+
+def _letter_add(json_str, panel_ref, layer_ref, image_dir, source_image, *controls):
+    try:
+        updated, selected = lettering.update_json(
+            json_str, panel_ref, layer_ref, _letter_values(*controls), add_new=True
+        )
+        image, note = _render_lettering_preview(
+            updated, panel_ref, image_dir, source_image
+        )
+        return (
+            updated, _updated_layer_choices(updated, panel_ref, selected),
+            f"Added a new lettering layer; preview source: {note}", image,
+        )
+    except (ValueError, OSError) as exc:
+        return json_str, gr.update(), str(exc), None
+
+
+def _letter_remove(json_str, panel_ref, layer_ref, image_dir, source_image):
+    try:
+        updated = lettering.remove_from_json(json_str, panel_ref, layer_ref)
+        selected = layer_ref if layer_ref in lettering.CORE_LAYERS else "dialogue"
+        image, note = _render_lettering_preview(
+            updated, panel_ref, image_dir, source_image
+        )
+        return (
+            updated, _updated_layer_choices(updated, panel_ref, selected),
+            f"Layer removed; preview source: {note}", image,
+        )
+    except (ValueError, OSError) as exc:
+        return json_str, gr.update(), str(exc), None
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ASSEMBLY SUB-TAB
@@ -971,6 +1183,13 @@ def create_comic_tab():
                             p1_shot = gr.Dropdown(label="Shot type", choices=SHOT_TYPES, value="medium")
                             p1_dialogue = gr.Textbox(label="Dialogue", placeholder='Speech bubble text (leave blank for none)')
                             p1_caption = gr.Textbox(label="Caption", placeholder='Narrator box text (leave blank for none)')
+                            with gr.Accordion("Bubble style & position", open=False):
+                                with gr.Row():
+                                    p1_dlg_style = gr.Dropdown(label="Dialogue style", choices=DIALOGUE_STYLE_CHOICES, value=text_styles.DIALOGUE_DEFAULT)
+                                    p1_dlg_anchor = gr.Dropdown(label="Dialogue position", choices=ANCHOR_CHOICES, value="")
+                                with gr.Row():
+                                    p1_cap_style = gr.Dropdown(label="Caption style", choices=CAPTION_STYLE_CHOICES, value=text_styles.CAPTION_DEFAULT)
+                                    p1_cap_anchor = gr.Dropdown(label="Caption position", choices=ANCHOR_CHOICES, value="")
                             with gr.Row():
                                 p1_pos = gr.Textbox(label="Positive extra", placeholder="extra prompt tokens")
                                 p1_neg = gr.Textbox(label="Negative extra", placeholder="extra negative tokens")
@@ -982,6 +1201,13 @@ def create_comic_tab():
                             p2_shot = gr.Dropdown(label="Shot type", choices=SHOT_TYPES, value="medium")
                             p2_dialogue = gr.Textbox(label="Dialogue", placeholder="")
                             p2_caption = gr.Textbox(label="Caption", placeholder="")
+                            with gr.Accordion("Bubble style & position", open=False):
+                                with gr.Row():
+                                    p2_dlg_style = gr.Dropdown(label="Dialogue style", choices=DIALOGUE_STYLE_CHOICES, value=text_styles.DIALOGUE_DEFAULT)
+                                    p2_dlg_anchor = gr.Dropdown(label="Dialogue position", choices=ANCHOR_CHOICES, value="")
+                                with gr.Row():
+                                    p2_cap_style = gr.Dropdown(label="Caption style", choices=CAPTION_STYLE_CHOICES, value=text_styles.CAPTION_DEFAULT)
+                                    p2_cap_anchor = gr.Dropdown(label="Caption position", choices=ANCHOR_CHOICES, value="")
                             with gr.Row():
                                 p2_pos = gr.Textbox(label="Positive extra", placeholder="")
                                 p2_neg = gr.Textbox(label="Negative extra", placeholder="")
@@ -993,6 +1219,13 @@ def create_comic_tab():
                             p3_shot = gr.Dropdown(label="Shot type", choices=SHOT_TYPES, value="medium")
                             p3_dialogue = gr.Textbox(label="Dialogue", placeholder="")
                             p3_caption = gr.Textbox(label="Caption", placeholder="")
+                            with gr.Accordion("Bubble style & position", open=False):
+                                with gr.Row():
+                                    p3_dlg_style = gr.Dropdown(label="Dialogue style", choices=DIALOGUE_STYLE_CHOICES, value=text_styles.DIALOGUE_DEFAULT)
+                                    p3_dlg_anchor = gr.Dropdown(label="Dialogue position", choices=ANCHOR_CHOICES, value="")
+                                with gr.Row():
+                                    p3_cap_style = gr.Dropdown(label="Caption style", choices=CAPTION_STYLE_CHOICES, value=text_styles.CAPTION_DEFAULT)
+                                    p3_cap_anchor = gr.Dropdown(label="Caption position", choices=ANCHOR_CHOICES, value="")
                             with gr.Row():
                                 p3_pos = gr.Textbox(label="Positive extra", placeholder="")
                                 p3_neg = gr.Textbox(label="Negative extra", placeholder="")
@@ -1004,6 +1237,13 @@ def create_comic_tab():
                             p4_shot = gr.Dropdown(label="Shot type", choices=SHOT_TYPES, value="medium")
                             p4_dialogue = gr.Textbox(label="Dialogue", placeholder="")
                             p4_caption = gr.Textbox(label="Caption", placeholder="")
+                            with gr.Accordion("Bubble style & position", open=False):
+                                with gr.Row():
+                                    p4_dlg_style = gr.Dropdown(label="Dialogue style", choices=DIALOGUE_STYLE_CHOICES, value=text_styles.DIALOGUE_DEFAULT)
+                                    p4_dlg_anchor = gr.Dropdown(label="Dialogue position", choices=ANCHOR_CHOICES, value="")
+                                with gr.Row():
+                                    p4_cap_style = gr.Dropdown(label="Caption style", choices=CAPTION_STYLE_CHOICES, value=text_styles.CAPTION_DEFAULT)
+                                    p4_cap_anchor = gr.Dropdown(label="Caption position", choices=ANCHOR_CHOICES, value="")
                             with gr.Row():
                                 p4_pos = gr.Textbox(label="Positive extra", placeholder="")
                                 p4_neg = gr.Textbox(label="Negative extra", placeholder="")
@@ -1166,11 +1406,16 @@ def create_comic_tab():
                     outputs=[pg1, pg2, pg3, pg4],
                 )
 
+                # order must match PANEL_FIELD_ORDER
                 _all_panel_fields = [
                     p1_scene, p1_shot, p1_dialogue, p1_caption, p1_pos, p1_neg, p1_no_char, p1_char_key,
+                    p1_dlg_style, p1_dlg_anchor, p1_cap_style, p1_cap_anchor,
                     p2_scene, p2_shot, p2_dialogue, p2_caption, p2_pos, p2_neg, p2_no_char, p2_char_key,
+                    p2_dlg_style, p2_dlg_anchor, p2_cap_style, p2_cap_anchor,
                     p3_scene, p3_shot, p3_dialogue, p3_caption, p3_pos, p3_neg, p3_no_char, p3_char_key,
+                    p3_dlg_style, p3_dlg_anchor, p3_cap_style, p3_cap_anchor,
                     p4_scene, p4_shot, p4_dialogue, p4_caption, p4_pos, p4_neg, p4_no_char, p4_char_key,
+                    p4_dlg_style, p4_dlg_anchor, p4_cap_style, p4_cap_anchor,
                 ]
 
                 add_page_btn.click(
@@ -1196,6 +1441,172 @@ def create_comic_tab():
                     outputs=[comic_log, comic_page_gallery],
                 )
                 stop_comic_btn.click(fn=_stop, outputs=[comic_log])
+            # -- Lettering sub-tab -----------------------------------------
+            with gr.Tab("Font Editor"):
+                gr.Markdown(
+                    "### Font, Bubble & Sound-Effect Editor\n"
+                    "Select a script panel, edit its dialogue/caption, or add as many "
+                    "independent bubbles and boxless effects as needed. Preview is "
+                    "non-destructive; **Apply to Script** writes the current layer."
+                )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        with gr.Row():
+                            letter_refresh_panels = gr.Button("Refresh Panels", variant="primary")
+                            letter_refresh_layers = gr.Button("Refresh Layers")
+                        letter_panel = gr.Dropdown(
+                            label="Panel", choices=[], value=None,
+                            info="Reads panels from the JSON editor on the Comic tab.",
+                        )
+                        with gr.Row():
+                            letter_layer = gr.Dropdown(
+                                label="Layer",
+                                choices=[
+                                    ("Dialogue bubble", "dialogue"),
+                                    ("Caption / narration", "caption"),
+                                ],
+                                value="dialogue",
+                            )
+                            letter_load = gr.Button("Load Layer")
+
+                        letter_text = gr.Textbox(
+                            label="Lettering text", lines=3,
+                            placeholder="POW! / dialogue / narration",
+                        )
+                        letter_style = gr.Dropdown(
+                            label="Preset", choices=ALL_STYLE_CHOICES,
+                            value=text_styles.EFFECT_DEFAULT,
+                            info="Includes speech, thought, exclamation, narration, and boxless SFX presets.",
+                        )
+                        with gr.Row():
+                            letter_font = gr.Dropdown(
+                                label="Font family", choices=FONT_CHOICES, value="impact",
+                                info="Add TTF/OTF files under sd-comic-ext/fonts for custom choices.",
+                            )
+                            letter_anchor = gr.Dropdown(
+                                label="9-grid position", choices=LETTER_ANCHOR_CHOICES,
+                                value="center",
+                            )
+                        with gr.Row():
+                            letter_x = gr.Slider(
+                                label="Horizontal nudge (%)", minimum=-50, maximum=50,
+                                step=1, value=0,
+                            )
+                            letter_y = gr.Slider(
+                                label="Vertical nudge (%)", minimum=-50, maximum=50,
+                                step=1, value=0,
+                            )
+                        with gr.Row():
+                            letter_width = gr.Slider(
+                                label="Layer width (%)", minimum=15, maximum=100,
+                                step=1, value=90,
+                            )
+                            letter_size = gr.Slider(
+                                label="Font size", minimum=12, maximum=140,
+                                step=1, value=52,
+                            )
+                            letter_rotation = gr.Slider(
+                                label="Rotation (degrees)", minimum=-45, maximum=45,
+                                step=1, value=-7,
+                            )
+                        with gr.Row():
+                            letter_color = gr.Textbox(
+                                label="Text color", value="#ffe85a",
+                                placeholder="#RRGGBB",
+                            )
+                            letter_outline = gr.Textbox(
+                                label="Outline color", value="#141414",
+                                placeholder="#RRGGBB",
+                            )
+
+                        with gr.Accordion("Preview image source", open=False):
+                            letter_image_dir = gr.Textbox(
+                                label="Generated panel directory",
+                                placeholder="Auto: comics/{title}/pages",
+                                info="Used when no image is uploaded below.",
+                            )
+                            letter_source = gr.Image(
+                                label="Optional panel image override", type="pil",
+                                height=360, interactive=True,
+                            )
+
+                        with gr.Row():
+                            letter_preview_btn = gr.Button("Preview")
+                            letter_apply_btn = gr.Button("Apply to Script", variant="primary")
+                        with gr.Row():
+                            letter_add_btn = gr.Button("Add as New Layer")
+                            letter_remove_btn = gr.Button("Remove Layer", variant="stop")
+
+                    with gr.Column(scale=1):
+                        letter_preview = gr.Image(
+                            label="Lettering preview", type="pil", height=760,
+                            interactive=False,
+                        )
+                        letter_status = gr.Markdown(
+                            "Open or create a script on the Comic tab, then click **Refresh Panels**."
+                        )
+                        gr.Markdown(
+                            "**Tip:** Dialogue and caption are the two built-in layers. "
+                            "Use **Add as New Layer** for a second bubble or any number of "
+                            "sound effects. Positive X moves right; positive Y moves down."
+                        )
+
+                letter_controls = [
+                    letter_text, letter_style, letter_font, letter_anchor,
+                    letter_x, letter_y, letter_width, letter_size,
+                    letter_rotation, letter_color, letter_outline,
+                ]
+                letter_action_inputs = [
+                    script_editor, letter_panel, letter_layer,
+                    letter_image_dir, letter_source, *letter_controls,
+                ]
+
+                letter_refresh_panels.click(
+                    fn=_letter_refresh_panels, inputs=[script_editor],
+                    outputs=[letter_panel, letter_status],
+                )
+                letter_refresh_layers.click(
+                    fn=_letter_refresh_layers,
+                    inputs=[script_editor, letter_panel],
+                    outputs=[letter_layer, letter_status],
+                )
+                letter_panel.change(
+                    fn=_letter_refresh_layers,
+                    inputs=[script_editor, letter_panel],
+                    outputs=[letter_layer, letter_status],
+                )
+                letter_load.click(
+                    fn=_letter_load_layer,
+                    inputs=[script_editor, letter_panel, letter_layer],
+                    outputs=[*letter_controls, letter_status],
+                )
+                letter_style.change(
+                    fn=_letter_preset_defaults, inputs=[letter_style],
+                    outputs=[
+                        letter_font, letter_anchor, letter_width, letter_size,
+                        letter_rotation, letter_color, letter_outline,
+                    ],
+                )
+                letter_preview_btn.click(
+                    fn=_letter_preview, inputs=letter_action_inputs,
+                    outputs=[letter_preview, letter_status],
+                )
+                letter_apply_btn.click(
+                    fn=_letter_apply, inputs=letter_action_inputs,
+                    outputs=[script_editor, letter_layer, letter_status, letter_preview],
+                )
+                letter_add_btn.click(
+                    fn=_letter_add, inputs=letter_action_inputs,
+                    outputs=[script_editor, letter_layer, letter_status, letter_preview],
+                )
+                letter_remove_btn.click(
+                    fn=_letter_remove,
+                    inputs=[
+                        script_editor, letter_panel, letter_layer,
+                        letter_image_dir, letter_source,
+                    ],
+                    outputs=[script_editor, letter_layer, letter_status, letter_preview],
+                )
 
             # ── Touchup sub-tab ───────────────────────────────────────────
             with gr.Tab("Touchup"):

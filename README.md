@@ -13,7 +13,8 @@ An A1111 WebUI extension that turns a JSON script into a full multi-page comic �
 - **img2img chaining** — reference earlier panels as init images for pose-to-pose continuity
 - **Composite mode** — generate background and character separately, then rembg-mask the character onto the background
 - **Camera vocabulary** — 11 shot types with diction variants, auto-inferred from scene text
-- **Page assembly** — PIL-based layout engine with translucent caption bars and speech bubbles
+- **Page assembly** — PIL-based layout engine with styleable caption boxes and speech/thought/shout/whisper bubbles, positioned per panel on a 9-grid
+- **Visual lettering editor** — layer multiple bubbles, captions, exclamations, and boxless SFX with font, color, size, rotation, and placement controls
 - **Export** — PDF and CBZ
 
 ## Requirements
@@ -32,7 +33,7 @@ cd stable-diffusion-webui/extensions
 git clone https://github.com/Graceus777/sd-comic-ext.git
 ```
 
-Restart the WebUI. `rembg` and `Pillow` install automatically on first launch via `install.py`. A **Comic Generator** tab appears with two sub-tabs: **Comic** and **Assembly**.
+Restart the WebUI. `rembg` and `Pillow` install automatically on first launch via `install.py`. A **Comic Generator** tab appears with four sub-tabs: **Comic**, **Font Editor**, **Touchup**, and **Assembly**.
 
 ## Authoring a script
 
@@ -105,6 +106,57 @@ Useful panel fields beyond the basics:
 - `init_from` + `init_denoise` — chain img2img from an earlier panel for pose continuity
 - `reuse` — skip generation and reuse an existing image on disk
 - `_comment` fields are ignored by the parser
+
+### Lettering editor, fonts, bubbles, and effects
+
+The **Font Editor** sub-tab is a visual lettering editor for text placement. Click **Refresh Panels**, choose a panel and layer, then edit and preview its preset, font family, 9-grid position, X/Y nudge, width, size, rotation, text color, and outline color. **Apply to Script** updates the selected dialogue/caption layer; **Add as New Layer** adds another independent bubble or effect. A panel can have any number of extra layers.
+
+See the [Font Editor guide](docs/FONT_EDITOR.md) for the complete workflow, preset reference, JSON schema, and troubleshooting.
+
+Built-in presets include:
+
+- Bubbles: `speech`, `thought`, `shout` (exclamation burst), `whisper`, and `radio`
+- Captions: `narration`, `caption_box`, `yellow_box`, and `parchment`
+- Boxless effects: `sfx`, `sfx_speed`, `sfx_horror`, `sfx_electric`, and `sfx_subtle`
+- Font families: comic, handwritten, impact/display, sans, serif, and monospace
+
+Drop `.ttf`, `.otf`, or `.ttc` files into `sd-comic-ext/fonts/` and restart/reload the extension to expose them as **Custom** font choices. Scripts store a logical font name rather than a machine-specific system path.
+
+The **Build Page** form also exposes preset and 9-grid position dropdowns. Scripts can use the full set of legacy dialogue/caption overrides:
+
+- `dialogue_style` / `caption_style`
+- `dialogue_anchor` / `caption_anchor`: `top-left`, `top-center`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-center`, or `bottom-right`
+- `dialogue_offset` / `caption_offset`: `[x, y]` nudge as percentages of panel size
+- `dialogue_width` / `caption_width`: layer width as a panel percentage
+- `dialogue_font_size` / `caption_font_size`: base pixels at a 1200px panel width
+- `dialogue_font` / `caption_font`, `*_rotation`, `*_color`, and `*_outline_color`
+
+Independent layers are stored under `lettering` and render after caption/dialogue:
+
+```json
+{
+  "id": "p0101",
+  "scene": "hero braces against the blast",
+  "dialogue": "Not today!",
+  "dialogue_style": "shout",
+  "dialogue_anchor": "top-center",
+  "lettering": [
+    {
+      "id": "fx1",
+      "text": "KRA-KOOM!",
+      "style": "sfx_electric",
+      "font": "impact",
+      "anchor": "center-right",
+      "offset": [-4, 3],
+      "width": 58,
+      "font_size": 68,
+      "rotation": 8,
+      "color": "#ffffff",
+      "outline_color": "#2355e6"
+    }
+  ]
+}
+```
 
 ## Assembly and export
 

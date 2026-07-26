@@ -3,6 +3,8 @@ Comic Generator — A1111 WebUI Extension entry point.
 
 Registers the Comic Generator tab:
   - Comic — JSON-scripted panel generation + page assembly
+  - Font Editor — font, bubble, caption, and sound-effect editing
+  - Touchup — panel review and selective regeneration
   - Assembly — standalone page re-assembly + PDF/CBZ export
 
 Strip scripts are available as built-in examples in the Comic tab's
